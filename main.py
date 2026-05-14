@@ -1050,14 +1050,38 @@ class MetaEditorApp(_Base):
         try:
             ext     = os.path.splitext(self._work_path)[1].lower()
             handler = get_handler(ext, self._work_path)
-            sections = handler.read()
+            load_warning = None
 
-            if not isinstance(handler, GeneralHandler):
-                sections += GeneralHandler(self._work_path).read()
+            if isinstance(handler, GeneralHandler):
+                # Unsupported format — show only the source file's filesystem
+                # properties (NOT the temp copy's, which would show a fresh
+                # birthtime instead of the original).
+                handler  = GeneralHandler(self._src_path)
+                sections = handler.read()
+            else:
+                try:
+                    sections = handler.read()
+                except Exception as inner:
+                    # Format-specific handler crashed (corrupt header, missing
+                    # codec, etc.). Fall back so the user can still edit dates
+                    # and other filesystem properties.
+                    label = (ext or "file").lstrip(".").upper() or "file"
+                    load_warning = (
+                        f"Couldn't parse {label} metadata "
+                        f"({inner.__class__.__name__}). "
+                        "Filesystem properties are still editable."
+                    )
+                    handler  = GeneralHandler(self._src_path)
+                    sections = []
 
-            self._handler   = handler
-            self._sections  = sections
-            self._originals = copy.deepcopy(sections)
+                # Always append filesystem properties of the original file.
+                if not any(s.get("_general") for s in sections):
+                    sections += GeneralHandler(self._src_path).read()
+
+            self._handler      = handler
+            self._sections     = sections
+            self._originals    = copy.deepcopy(sections)
+            self._load_warning = load_warning
 
             size     = os.path.getsize(self._src_path)
             filename = os.path.basename(self._src_path)
@@ -1091,7 +1115,12 @@ class MetaEditorApp(_Base):
         editable_count = sum(1 for s in self._sections
                              for f in s.get("fields", []) if f.get("editable"))
         self._set_status(f"Loaded {filename}  •  {editable_count} editable fields")
-        self._toast.show(f"Opened {filename}", kind="success")
+        warning = getattr(self, "_load_warning", None)
+        if warning:
+            self._toast.show(warning, kind="warning", duration=6000)
+            self._load_warning = None
+        else:
+            self._toast.show(f"Opened {filename}", kind="success")
 
     def _load_error(self, msg):
         self._btn_open.configure(state="normal", text="📂  Open File")
@@ -1143,14 +1172,19 @@ class MetaEditorApp(_Base):
             specific = [s for s in self._sections if not s.get("_general")]
             general  = [s for s in self._sections if s.get("_general")]
 
-            if isinstance(fresh, GeneralHandler):
-                fresh.write(self._sections)
-            else:
+            # Format-specific edits rewrite file content/headers — do them
+            # on the temp copy first.
+            if not isinstance(fresh, GeneralHandler):
                 fresh.write(specific)
-                if general:
-                    GeneralHandler(self._work_path).write(general)
 
             shutil.copy2(self._work_path, dest)
+
+            # Filesystem-level edits (mtime/atime/btime, perms, xattrs) MUST
+            # be applied to the actual destination. shutil.copy2 propagates
+            # mtime/atime, but birthtime and macOS xattrs do not transfer
+            # from the work copy.
+            if general:
+                GeneralHandler(dest).write(general)
 
             self._originals = copy.deepcopy(self._sections)
             # Refresh modified marks
@@ -1198,8 +1232,10 @@ class MetaEditorApp(_Base):
             fresh = get_handler(ext, self._work_path)
             if hasattr(fresh, "strip"):
                 fresh.strip()
-            GeneralHandler(self._work_path).strip()
             shutil.copy2(self._work_path, dest)
+            # macOS xattrs don't ride along with shutil.copy2 — strip on the
+            # destination too so an existing-file overwrite is fully clean.
+            GeneralHandler(dest).strip()
             self._set_status(f"Stripped → {os.path.basename(dest)}")
             self._toast.show("Metadata stripped from copy", kind="success")
         except Exception as e:
