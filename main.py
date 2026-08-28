@@ -765,11 +765,13 @@ class MetaEditorApp(_Base):
         self._content.grid_rowconfigure(0, weight=1)
         self._build_welcome_splash(self._welcome_main)
 
-        # Toolbar
-        self._toolbar = ctk.CTkFrame(self._content, height=60, corner_radius=0,
+        # Toolbar — two rows so Undo/Redo stay visible on a normal-sized window.
+        self._toolbar = ctk.CTkFrame(self._content, corner_radius=0,
                                      fg_color=BG_ROOT)
+        self._toolbar_row1 = ctk.CTkFrame(self._toolbar, fg_color="transparent")
+        self._toolbar_row2 = ctk.CTkFrame(self._toolbar, fg_color="transparent")
         self._search_var = ctk.StringVar()
-        self._search_var.trace("w", self._on_search)
+        self._search_var.trace_add("write", self._on_search)
 
         # Search with prefix icon hack: place a label on top of the entry
         search_wrap = ctk.CTkFrame(self._toolbar, fg_color="transparent")
@@ -777,12 +779,12 @@ class MetaEditorApp(_Base):
         self._search_entry = ctk.CTkEntry(
             search_wrap, textvariable=self._search_var,
             placeholder_text="    Search fields by name or value…",
-            width=340, height=38, corner_radius=R_MD,
+            width=220, height=38, corner_radius=R_MD,
             fg_color=BG_PANEL, border_color=BORDER_HAIR,
             text_color=TX_PRIMARY,
             font=font(12),
         )
-        self._search_entry.pack(side="left")
+        self._search_entry.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(self._search_entry, text="🔍",
                      fg_color="transparent", text_color=TX_TERTIARY,
                      font=font(12),
@@ -814,12 +816,38 @@ class MetaEditorApp(_Base):
         self._scroll = ctk.CTkScrollableFrame(
             self._content, fg_color="transparent", corner_radius=0,
         )
+        self._enable_trackpad_scroll(self._scroll)
+
+    def _enable_trackpad_scroll(self, scroll_frame):
+        # Tk 9 on macOS delivers two-finger trackpad / mouse-wheel gestures as
+        # <TouchpadScroll> with a packed x/y delta — not <MouseWheel>, which
+        # is all CustomTkinter listens to — so scrolling silently did nothing.
+        def _handler(event, sf=scroll_frame):
+            try:
+                if not sf._check_if_valid_scroll(event.widget):
+                    return
+                packed = int(event.delta)
+            except Exception:
+                return
+            dy = ((packed & 0xFFFF) ^ 0x8000) - 0x8000
+            dx = (((packed >> 16) & 0xFFFF) ^ 0x8000) - 0x8000
+            canvas = sf._parent_canvas
+            try:
+                if sf._shift_pressed:
+                    if dx and canvas.xview() != (0.0, 1.0):
+                        canvas.xview("scroll", -dx, "units")
+                elif dy and canvas.yview() != (0.0, 1.0):
+                    canvas.yview("scroll", -dy, "units")
+            except Exception:
+                pass
+        scroll_frame.bind_all("<TouchpadScroll>", _handler, add=True)
 
     def _build_welcome_splash(self, parent):
         # Use a scrollable container so the splash never gets cut off on smaller windows
         outer = ctk.CTkScrollableFrame(parent, fg_color="transparent",
                                        corner_radius=0)
         outer.pack(fill="both", expand=True)
+        self._enable_trackpad_scroll(outer)
 
         inner = ctk.CTkFrame(outer, fg_color="transparent")
         inner.pack(pady=(SP_XL, SP_XL))
@@ -962,13 +990,23 @@ class MetaEditorApp(_Base):
         self._content.grid_rowconfigure(1, weight=1)
 
         self._toolbar.grid(row=0, column=0, sticky="ew", padx=SP_LG, pady=(SP_LG, SP_SM))
-        self._search_wrap.pack(side="left", padx=(0, SP_MD), pady=SP_SM)
-        self._filter_wrap.pack(side="left", padx=(0, SP_MD), pady=SP_SM)
-        self._btn_expand.pack(side="left",   padx=SP_XS, pady=SP_SM)
-        self._btn_collapse.pack(side="left", padx=SP_XS, pady=SP_SM)
-        self._btn_reset.pack(side="left",    padx=SP_XS, pady=SP_SM)
-        self._btn_redo.pack(side="right", padx=(SP_XS, 0), pady=SP_SM)
-        self._btn_undo.pack(side="right", padx=SP_XS, pady=SP_SM)
+        self._toolbar_row1.pack(fill="x")
+        self._toolbar_row2.pack(fill="x")
+        self._search_wrap.pack(in_=self._toolbar_row1, side="left",
+                               fill="x", expand=True,
+                               padx=(0, SP_MD), pady=SP_SM)
+        self._filter_wrap.pack(in_=self._toolbar_row1, side="left",
+                               padx=(0, SP_MD), pady=SP_SM)
+        self._btn_expand.pack(in_=self._toolbar_row2, side="left",
+                              padx=SP_XS, pady=(0, SP_SM))
+        self._btn_collapse.pack(in_=self._toolbar_row2, side="left",
+                                padx=SP_XS, pady=(0, SP_SM))
+        self._btn_reset.pack(in_=self._toolbar_row2, side="left",
+                             padx=SP_XS, pady=(0, SP_SM))
+        self._btn_redo.pack(in_=self._toolbar_row2, side="right",
+                            padx=(SP_XS, 0), pady=(0, SP_SM))
+        self._btn_undo.pack(in_=self._toolbar_row2, side="right",
+                            padx=SP_XS, pady=(0, SP_SM))
 
         self._scroll.grid(row=1, column=0, sticky="nsew", padx=SP_LG, pady=(SP_SM, SP_LG))
         self._set_filter_mode("all")  # initialize chip styles
@@ -1487,7 +1525,7 @@ class MetaEditorApp(_Base):
                     self._sections[s]["fields"][f]["value"] = val
                     self._flag_modified(s, f, val != orig)
 
-            var.trace("w", _on_type)
+            var.trace_add("write", _on_type)
 
             # Focus state — border lights up to the section accent when the
             # input has the keyboard focus, giving a clear visual cue.
